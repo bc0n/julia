@@ -125,36 +125,45 @@ JL_DLLEXPORT void jl_write_compiler_output(void)
 
     // jl_dump_native writes the clone_targets into `s`
     // We need to postpone the srctext writing after that.
-    if (native_code) {
+    // Note that this region of code is carefully ordered to minimize
+    // live memory at any given point. Consider this when making changes.
+    if (emit_native) {
+        assert(native_code && "Forgot to emit native code?");
+        ios_t f;
+        if (emit_split) {
+            if (ios_file(&f, jl_options.outputji, 1, 1, 1, 1) == NULL)
+                jl_errorf("cannot open system image file \"%s\" for writing", jl_options.outputo);
+            ios_write(&f, (const char*)s->buf, (size_t)s->size);
+            ios_close(s);
+            free(s);
+        }
         jl_dump_native(native_code,
                         jl_options.outputbc,
                         jl_options.outputunoptbc,
                         jl_options.outputo,
                         jl_options.outputasm,
-                        (const char*)z->buf, (size_t)z->size, s);
+                        (const char*)z->buf, (size_t)z->size, emit_split ? &f : NULL);
+        ios_close(z);
+        free(z);
+        if (emit_split && jl_options.incremental) {
+            write_srctext(&f, udeps, srctextpos);
+        }
+        ios_close(&f);
         jl_postoutput_hook();
-    }
-
-    if ((jl_options.outputji || emit_native) && jl_options.incremental) {
-        write_srctext(s, udeps, srctextpos);
-    }
-
-    if (jl_options.outputji) {
+    } else if (jl_options.outputji) {
         ios_t f;
         if (ios_file(&f, jl_options.outputji, 1, 1, 1, 1) == NULL)
             jl_errorf("cannot open system image file \"%s\" for writing", jl_options.outputji);
         ios_write(&f, (const char*)s->buf, (size_t)s->size);
-        ios_close(&f);
-    }
-
-    if (s) {
         ios_close(s);
         free(s);
-    }
-
-    if (emit_split) {
-        ios_close(z);
-        free(z);
+        if (jl_options.incremental) {
+            write_srctext(&f, udeps, srctextpos);
+        }
+        ios_close(&f);
+    } else if (s) {
+        ios_close(s);
+        free(s);
     }
 
     for (size_t i = 0; i < jl_current_modules.size; i += 2) {
