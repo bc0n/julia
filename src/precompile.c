@@ -137,14 +137,17 @@ JL_DLLEXPORT void jl_write_compiler_output(void)
             ios_close(s);
             free(s);
         }
+        void *sysimg_data_module = jl_create_sysimg_data_module(native_code, (const char*)z->buf, (size_t)z->size);
+        ios_close(z);
+        free(z);
+        void *sysimg_data_outputs = jl_dump_sysimg_data_module(sysimg_data_module,
+            jl_options.outputbc, jl_options.outputunoptbc, jl_options.outputo, jl_options.outputasm);
         jl_dump_native(native_code,
                         jl_options.outputbc,
                         jl_options.outputunoptbc,
                         jl_options.outputo,
                         jl_options.outputasm,
-                        (const char*)z->buf, (size_t)z->size, emit_split ? &f : NULL);
-        ios_close(z);
-        free(z);
+                        sysimg_data_outputs, emit_split ? &f : NULL);
         if (emit_split && jl_options.incremental) {
             write_srctext(&f, udeps, srctextpos);
         }

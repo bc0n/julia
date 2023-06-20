@@ -10,9 +10,13 @@
 
 #define UNAVAILABLE { jl_errorf("%s: not available in this build of Julia", __func__); }
 
+JL_DLLEXPORT void *jl_create_sysimg_data_module_fallback(void *native_code, const char *sysimg_data, size_t sysimg_len) UNAVAILABLE
+JL_DLLEXPORT void *jl_dump_sysimg_data_module_fallback(void *sysimg_data_module,
+    const char *bc_fname, const char *unopt_bc_fname, const char *obj_fname,
+    const char *asm_fname) UNAVAILABLE
 JL_DLLEXPORT void jl_dump_native_fallback(void *native_code,
         const char *bc_fname, const char *unopt_bc_fname, const char *obj_fname, const char *asm_fname,
-        const char *sysimg_data, size_t sysimg_len, ios_t *s) UNAVAILABLE
+        void *sysimg_data_outputs, ios_t *s) UNAVAILABLE
 JL_DLLEXPORT void jl_get_llvm_gvs_fallback(void *native_code, arraylist_t *gvs) UNAVAILABLE
 JL_DLLEXPORT void jl_get_llvm_external_fns_fallback(void *native_code, arraylist_t *gvs) UNAVAILABLE
 

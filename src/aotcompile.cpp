@@ -1237,7 +1237,7 @@ static void add_output(Module &M, TargetMachine &TM, std::vector<std::string> &o
                 std::vector<NewArchiveMember> &unopt, std::vector<NewArchiveMember> &opt,
                 std::vector<NewArchiveMember> &obj, std::vector<NewArchiveMember> &asm_,
                 bool unopt_out, bool opt_out, bool obj_out, bool asm_out,
-                unsigned threads, ModuleInfo module_info) {
+                unsigned threads) {
     unsigned outcount = unopt_out + opt_out + obj_out + asm_out;
     assert(outcount);
     outputs.resize(outputs.size() + outcount * threads * 2);
@@ -1457,16 +1457,109 @@ static unsigned compute_image_thread_count(const ModuleInfo &info) {
     return threads;
 }
 
+static auto getAOTTriple(Triple TheTriple) {
+    if (TheTriple.isOSWindows()) {
+        TheTriple.setObjectFormat(Triple::COFF);
+    } else if (TheTriple.isOSDarwin()) {
+        TheTriple.setObjectFormat(Triple::MachO);
+        TheTriple.setOS(llvm::Triple::MacOSX);
+    }
+    return TheTriple;
+}
+
+extern "C" JL_DLLEXPORT_CODEGEN
+void *jl_create_sysimg_data_module_impl(void *native_code, const char *sysimg_data, size_t sysimg_len)
+{
+    if (!sysimg_data)
+        return nullptr;
+    // We make a new context here so that we don't bother interning the giant sysimg_data array in the data context
+    auto Context = new LLVMContext();
+    Module *M;
+    Triple TheTriple;
+    {
+        jl_native_code_desc_t *data = (jl_native_code_desc_t*)native_code;
+        TheTriple = data->M.withModuleDo([&](Module &dataM) {
+            auto TheTriple = getAOTTriple(Triple(dataM.getTargetTriple()));
+            M = new Module("julia", *Context);
+            M->setDataLayout(dataM.getDataLayout());
+            M->setTargetTriple(TheTriple.str());
+            M->setStackProtectorGuard(dataM.getStackProtectorGuard());
+            M->setOverrideStackAlignment(dataM.getOverrideStackAlignment());
+            return TheTriple;
+        });
+    }
+
+    Constant *data = ConstantDataArray::get(*Context,
+        ArrayRef<uint8_t>((const unsigned char*)sysimg_data, sysimg_len));
+    auto sysdata = new GlobalVariable(*M, data->getType(), false,
+                                    GlobalVariable::ExternalLinkage,
+                                    data, "jl_system_image_data");
+    sysdata->setAlignment(Align(64));
+    addComdat(sysdata, TheTriple);
+    Constant *len = ConstantInt::get(M->getDataLayout().getIntPtrType(*Context, 0), sysimg_len);
+    addComdat(new GlobalVariable(*M, len->getType(), true,
+                                    GlobalVariable::ExternalLinkage,
+                                    len, "jl_system_image_size"), TheTriple);
+    return M;
+}
+
+struct jl_sysimg_data_outputs_t {
+    std::vector<NewArchiveMember> unopt, opt, obj, asm_;
+    std::vector<std::string> outputs;
+};
+
+static auto getAOTTargetMachine(const Triple &TheTriple) {
+    Optional<Reloc::Model> RelocModel;
+    if (TheTriple.isOSLinux() || TheTriple.isOSFreeBSD()) {
+        RelocModel = Reloc::PIC_;
+    }
+    CodeModel::Model CMModel = CodeModel::Small;
+    if (TheTriple.isPPC()) {
+        // On PPC the small model is limited to 16bit offsets
+        CMModel = CodeModel::Medium;
+    }
+    return std::unique_ptr<TargetMachine>(
+        jl_ExecutionEngine->getTarget().createTargetMachine(
+            TheTriple.getTriple(),
+            jl_ExecutionEngine->getTargetCPU(),
+            jl_ExecutionEngine->getTargetFeatureString(),
+            jl_ExecutionEngine->getTargetOptions(),
+            RelocModel,
+            CMModel,
+            CodeGenOpt::Aggressive // -O3 TODO: respect command -O0 flag?
+            ));
+}
+
+extern "C" JL_DLLEXPORT_CODEGEN
+void *jl_dump_sysimg_data_module_impl(void *sysimg_data_module,
+    const char *bc_fname, const char *unopt_bc_fname, const char *obj_fname,
+    const char *asm_fname) {
+    Module *M = (Module*)sysimg_data_module;
+    auto Context = &M->getContext();
+    auto outputs = new jl_sysimg_data_outputs_t();
+    outputs->outputs.reserve(2 * (!!unopt_bc_fname + !!bc_fname + !!obj_fname + !!asm_fname));
+    add_output(*M, *getAOTTargetMachine(Triple(M->getTargetTriple())),
+        outputs->outputs, "sysimg",
+        outputs->unopt, outputs->opt, outputs->obj, outputs->asm_,
+        !!unopt_bc_fname, !!bc_fname, !!obj_fname, !!asm_fname,
+        1);
+    // Clean up memory associated with the module asap
+    delete M;
+    delete Context;
+    return outputs;
+}
+
 // takes the running content that has collected in the shadow module and dump it to disk
 // this builds the object file portion of the sysimage files for fast startup
 extern "C" JL_DLLEXPORT_CODEGEN
 void jl_dump_native_impl(void *native_code,
         const char *bc_fname, const char *unopt_bc_fname, const char *obj_fname,
         const char *asm_fname,
-        const char *sysimg_data, size_t sysimg_len, ios_t *s)
+        void *sysimg_data_outputs, ios_t *s)
 {
     JL_TIMING(NATIVE_AOT, NATIVE_Dump);
     jl_native_code_desc_t *data = (jl_native_code_desc_t*)native_code;
+    jl_sysimg_data_outputs_t *sysimg_data = (jl_sysimg_data_outputs_t*)sysimg_data_outputs;
     if (!bc_fname && !unopt_bc_fname && !obj_fname && !asm_fname) {
         LLVM_DEBUG(dbgs() << "No output requested, skipping native code dump?\n");
         delete data;
@@ -1479,32 +1572,9 @@ void jl_dump_native_impl(void *native_code,
     // it uses the large code model and we may potentially
     // want less optimizations there.
     // make sure to emit the native object format, even if FORCE_ELF was set in codegen
-    Triple TheTriple(data->M.getModuleUnlocked()->getTargetTriple());
-    if (TheTriple.isOSWindows()) {
-        TheTriple.setObjectFormat(Triple::COFF);
-    } else if (TheTriple.isOSDarwin()) {
-        TheTriple.setObjectFormat(Triple::MachO);
-        TheTriple.setOS(llvm::Triple::MacOSX);
-    }
-    Optional<Reloc::Model> RelocModel;
-    if (TheTriple.isOSLinux() || TheTriple.isOSFreeBSD()) {
-        RelocModel = Reloc::PIC_;
-    }
-    CodeModel::Model CMModel = CodeModel::Small;
-    if (TheTriple.isPPC()) {
-        // On PPC the small model is limited to 16bit offsets
-        CMModel = CodeModel::Medium;
-    }
-    std::unique_ptr<TargetMachine> SourceTM(
-        jl_ExecutionEngine->getTarget().createTargetMachine(
-            TheTriple.getTriple(),
-            jl_ExecutionEngine->getTargetCPU(),
-            jl_ExecutionEngine->getTargetFeatureString(),
-            jl_ExecutionEngine->getTargetOptions(),
-            RelocModel,
-            CMModel,
-            CodeGenOpt::Aggressive // -O3 TODO: respect command -O0 flag?
-            ));
+    Triple TheTriple(getAOTTriple(Triple(data->M.getModuleUnlocked()->getTargetTriple())));
+    
+    auto SourceTM = getAOTTargetMachine(TheTriple);
 
 
     std::vector<NewArchiveMember> bc_Archive;
@@ -1606,7 +1676,7 @@ void jl_dump_native_impl(void *native_code,
             M, *SourceTM, outputs, name,
             unopt_bc_Archive, bc_Archive, obj_Archive, asm_Archive,
             !!unopt_bc_fname, !!bc_fname, !!obj_fname, !!asm_fname,
-            threads, module_info
+            threads
     ); };
 
     compile(*dataM, "text", threads);
@@ -1614,10 +1684,8 @@ void jl_dump_native_impl(void *native_code,
     auto sysimageM = std::make_unique<Module>("sysimage", Context);
     sysimageM->setTargetTriple(dataM->getTargetTriple());
     sysimageM->setDataLayout(dataM->getDataLayout());
-#if JL_LLVM_VERSION >= 130000
     sysimageM->setStackProtectorGuard(dataM->getStackProtectorGuard());
     sysimageM->setOverrideStackAlignment(dataM->getOverrideStackAlignment());
-#endif
 
     if (TheTriple.isOSWindows()) {
         // Windows expect that the function `_DllMainStartup` is present in an dll.
@@ -1635,19 +1703,6 @@ void jl_dump_native_impl(void *native_code,
     bool has_veccall = dataM->getModuleFlag("julia.mv.veccall");
     data->M = orc::ThreadSafeModule(); // free memory for data->M
 
-    if (sysimg_data) {
-        Constant *data = ConstantDataArray::get(Context,
-            ArrayRef<uint8_t>((const unsigned char*)sysimg_data, sysimg_len));
-        auto sysdata = new GlobalVariable(*sysimageM, data->getType(), false,
-                                     GlobalVariable::ExternalLinkage,
-                                     data, "jl_system_image_data");
-        sysdata->setAlignment(Align(64));
-        addComdat(sysdata, TheTriple);
-        Constant *len = ConstantInt::get(T_size, sysimg_len);
-        addComdat(new GlobalVariable(*sysimageM, len->getType(), true,
-                                     GlobalVariable::ExternalLinkage,
-                                     len, "jl_system_image_size"), TheTriple);
-    }
     if (imaging_mode) {
         auto specs = jl_get_llvm_clone_targets();
         const uint32_t base_flags = has_veccall ? JL_TARGET_VEC_CALL : 0;
@@ -1697,6 +1752,13 @@ void jl_dump_native_impl(void *native_code,
 
     compile(*sysimageM, "data", 1);
 
+    if (sysimg_data) {
+        unopt_bc_Archive.insert(unopt_bc_Archive.end(), std::make_move_iterator(sysimg_data->unopt.begin()), std::make_move_iterator(sysimg_data->unopt.end()));
+        bc_Archive.insert(bc_Archive.end(), std::make_move_iterator(sysimg_data->opt.begin()), std::make_move_iterator(sysimg_data->opt.end()));
+        obj_Archive.insert(obj_Archive.end(), std::make_move_iterator(sysimg_data->obj.begin()), std::make_move_iterator(sysimg_data->obj.end()));
+        asm_Archive.insert(asm_Archive.end(), std::make_move_iterator(sysimg_data->asm_.begin()), std::make_move_iterator(sysimg_data->asm_.end()));
+    }
+
     object::Archive::Kind Kind = getDefaultForHost(TheTriple);
     if (unopt_bc_fname)
         handleAllErrors(writeArchive(unopt_bc_fname, unopt_bc_Archive, true,
@@ -1712,6 +1774,7 @@ void jl_dump_native_impl(void *native_code,
                     Kind, true, false), reportWriterError);
 
     delete data;
+    delete sysimg_data;
 }
 
 void addTargetPasses(legacy::PassManagerBase *PM, const Triple &triple, TargetIRAnalysis analysis)

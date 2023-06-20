@@ -533,6 +533,8 @@
     YY(jl_get_llvm_function) \
     YY(jl_get_llvm_module) \
     YY(jl_get_LLVM_VERSION) \
+    YY(jl_create_sysimg_data_module) \
+    YY(jl_dump_sysimg_data_module) \
     YY(jl_dump_native) \
     YY(jl_get_llvm_gvs) \
     YY(jl_get_llvm_external_fns) \
