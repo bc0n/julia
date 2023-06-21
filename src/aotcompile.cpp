@@ -1471,23 +1471,24 @@ static auto getAOTTriple(Triple TheTriple) {
 extern "C" JL_DLLEXPORT_CODEGEN
 void *jl_create_sysimg_data_module_impl(void *native_code, const char *sysimg_data, size_t sysimg_len)
 {
-    if (!sysimg_data)
+    if (!sysimg_data) {
+        dbgs() << "No sysimg data provided\n";
         return nullptr;
+    }
     // We make a new context here so that we don't bother interning the giant sysimg_data array in the data context
     auto Context = new LLVMContext();
     Module *M;
     Triple TheTriple;
     {
         jl_native_code_desc_t *data = (jl_native_code_desc_t*)native_code;
-        TheTriple = data->M.withModuleDo([&](Module &dataM) {
-            auto TheTriple = getAOTTriple(Triple(dataM.getTargetTriple()));
+        data->M.withModuleDo([&](Module &dataM) {
+            TheTriple = getAOTTriple(Triple(dataM.getTargetTriple()));
             dbgs() << "Triple is " << TheTriple.str() << "\n";
             M = new Module("julia", *Context);
             M->setDataLayout(dataM.getDataLayout());
             M->setTargetTriple(TheTriple.str());
             M->setStackProtectorGuard(dataM.getStackProtectorGuard());
             M->setOverrideStackAlignment(dataM.getOverrideStackAlignment());
-            return TheTriple;
         });
     }
 
@@ -1755,6 +1756,7 @@ void jl_dump_native_impl(void *native_code,
     compile(*sysimageM, "data", 1);
 
     if (sysimg_data) {
+        assert(!sysimg_data->unopt.empty() || !sysimg_data->opt.empty() || !sysimg_data->obj.empty() || !sysimg_data->asm_.empty() && "Should have emitted something?");
         unopt_bc_Archive.insert(unopt_bc_Archive.end(), std::make_move_iterator(sysimg_data->unopt.begin()), std::make_move_iterator(sysimg_data->unopt.end()));
         bc_Archive.insert(bc_Archive.end(), std::make_move_iterator(sysimg_data->opt.begin()), std::make_move_iterator(sysimg_data->opt.end()));
         obj_Archive.insert(obj_Archive.end(), std::make_move_iterator(sysimg_data->obj.begin()), std::make_move_iterator(sysimg_data->obj.end()));
