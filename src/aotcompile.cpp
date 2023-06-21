@@ -78,6 +78,7 @@ static void addComdat(GlobalValue *G, Triple &T)
     if (T.isOSBinFormatCOFF() && !G->isDeclaration()) {
         // add __declspec(dllexport) to everything marked for export
         assert(G->hasExternalLinkage() && "Cannot set DLLExport on non-external linkage!");
+        dbgs() << "Adding DLLExport to " << G->getName() << "\n";
         G->setDLLStorageClass(GlobalValue::DLLExportStorageClass);
     }
 }
@@ -1480,6 +1481,7 @@ void *jl_create_sysimg_data_module_impl(void *native_code, const char *sysimg_da
         jl_native_code_desc_t *data = (jl_native_code_desc_t*)native_code;
         TheTriple = data->M.withModuleDo([&](Module &dataM) {
             auto TheTriple = getAOTTriple(Triple(dataM.getTargetTriple()));
+            dbgs() << "Triple is " << TheTriple.str() << "\n";
             M = new Module("julia", *Context);
             M->setDataLayout(dataM.getDataLayout());
             M->setTargetTriple(TheTriple.str());
@@ -1573,7 +1575,7 @@ void jl_dump_native_impl(void *native_code,
     // want less optimizations there.
     // make sure to emit the native object format, even if FORCE_ELF was set in codegen
     Triple TheTriple(getAOTTriple(Triple(data->M.getModuleUnlocked()->getTargetTriple())));
-    
+
     auto SourceTM = getAOTTargetMachine(TheTriple);
 
 

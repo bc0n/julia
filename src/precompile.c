@@ -150,8 +150,8 @@ JL_DLLEXPORT void jl_write_compiler_output(void)
                         sysimg_data_outputs, emit_split ? &f : NULL);
         if (emit_split && jl_options.incremental) {
             write_srctext(&f, udeps, srctextpos);
+            ios_close(&f);
         }
-        ios_close(&f);
         jl_postoutput_hook();
     } else if (jl_options.outputji) {
         ios_t f;
